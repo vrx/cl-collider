@@ -1,6 +1,8 @@
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (named-readtables:defreadtable :sc
-    (:merge :common-lisp)))
+    (:merge
+     #-ccl :common-lisp
+     #+ccl :current)))
 
 (defpackage #:cl-collider
   (:use #:cl)
@@ -23,6 +25,7 @@
 	   #:defsynth
 	   #:synth
 	   #:get-synthdef-metadata
+       #:synthdef-metadata
 	   #:with-controls
 	   #:play
 	   #:proxy

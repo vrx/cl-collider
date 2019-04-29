@@ -3,19 +3,36 @@
 (defvar *s* nil
   "Special symbol bound to the default scsynth server. If functions do not specify a target server, that message is sent to the *s* server.")
 
+#+windows
+(defvar *win-sc-dir*
+  (or (find-if (alexandria:compose (alexandria:curry #'search "SuperCollider")
+				   #'namestring)
+	       (uiop:subdirectories (uiop:getenv-pathname "ProgramFiles"))
+	       :from-end t)
+      (progn (warn "SuperCollider was not found in the default path.") #p"")))
+
 ;; default path are which build target from source
 (defvar *sc-synth-program*
   #+darwin "/Applications/SuperCollider/SuperCollider.app/Contents/Resources/scsynth"
-  #+linux "/usr/local/bin/scsynth"
-  #+windows "c:/Program Files/SuperCollider-3.9.3/scsynth.exe"
+  #+linux (handler-case
+            (uiop:run-program "which scsynth" :output :line)
+            (t (c)
+               (warn "SuperCollider was not found in the system path.")
+               nil))
+  #+windows (merge-pathnames *win-sc-dir* #P"scsynth.exe")
   "The path to the scsynth binary.")
 
 (setf *sc-plugin-paths*
   #+darwin (list "/Applications/SuperCollider/SuperCollider.app/Contents/Resources/plugins/"
 		 "~/Library/Application\ Support/SuperCollider/Extensions/")
-  #+linux (list "/usr/local/lib/SuperCollider/plugins/"
-		"/usr/local/share/SuperCollider/Extensions/")
-  #+windows (list "c:/Program Files/SuperCollider-3.9.3/plugins/"
+  #+linux (remove-if-not
+            #'uiop:directory-exists-p
+            (list
+              "/usr/local/lib/SuperCollider/plugins/"
+              "/usr/lib/SuperCollider/plugins/"
+              "/usr/local/share/SuperCollider/Extensions/"
+              "/usr/share/SuperCollider/Extensions/"))
+  #+windows (list (merge-pathnames #P"plugins/" *win-sc-dir*)
 		  (full-pathname (merge-pathnames #P"SuperCollider/Extensions/"
 						  (uiop:get-folder-path :local-appdata)))))
 
@@ -436,7 +453,7 @@
     `(let* ((,file-name (full-pathname ,output-files))
 	    (,osc-file (cat (subseq ,file-name 0 (position #\. ,file-name)) ".osc"))
 	    (*s* (make-instance 'nrt-server :name "NRTSynth" :streams nil)))
-       (make-group 1 :pos :head :to 0)
+       (make-group :id 1 :pos :head :to 0)
        ,@body
        (when ,pad (send-bundle *s* (* 1.0d0 ,pad) (list "/c_set" 0 0)))
        (with-open-file (,non-realtime-stream ,osc-file :direction :output :if-exists :supersede
@@ -447,14 +464,14 @@
 	     (write-sequence (osc::encode-int32 (length ,message)) ,non-realtime-stream)
 	     (write-sequence ,message ,non-realtime-stream))))
        (sc-program-run (full-pathname *sc-synth-program*)
-		       (list "-U" (format nil "~{\"~a\"~^:~}" (mapcar #'full-pathname *sc-plugin-paths*))
-			     "-N" ,osc-file
-			     "_" ,file-name ,sr (string-upcase (pathname-type ,file-name))
-			     (ecase ,format
-			       (:int16 "int16")
-			       (:int24 "int24")
-			       (:float "float")
-			       (:double "double"))))
+		               (list "-U" (format nil "~{~a~^:~}" (mapcar #'full-pathname *sc-plugin-paths*))
+			                 "-N" ,osc-file
+			                 "_" ,file-name ,(write-to-string sr) (string-upcase (pathname-type ,file-name))
+			                 (ecase ,format
+			                   (:int16 "int16")
+			                   (:int24 "int24")
+			                   (:float "float")
+			                   (:double "double"))))
        (unless ,keep-osc-file
 	 (delete-file ,osc-file))
        (values))))
@@ -552,7 +569,6 @@
       (let* ((group-id (if id id (incf new-group-id)))
 	     (group (make-instance 'group :server server :id group-id :pos pos :to target-id)))
 	(message-distribute group (list "/g_new" group-id (node-to-pos pos) target-id) server)
-	(sync)
 	group))))
 
 (defun server-query-all-nodes (&optional (rt-server *s*))
@@ -611,20 +627,12 @@
 (defun clock-clear ()
   (tempo-clock-clear (tempo-clock *s*)))
 
-(defmacro at-beat (beat synth-name &body param &key &allow-other-keys)
-  (alexandria:with-gensyms (b p)
-    `(let* ((,b ,beat))
-       (tempo-clock-add (tempo-clock *s*) ,b
-			(let* ((,p (list ,@param)))
-			  (lambda ()
-			    (at (beats-to-secs (tempo-clock *s*) ,b)
-			      (apply ,(if (keywordp synth-name) #'ctrl #'synth) ,synth-name ,p))))))))
+
+(defmacro at-beat (beat &body body)
+  `(at (beats-to-secs (tempo-clock *s*) ,beat)
+     ,@body))
 
 (defmacro at-task (beat function &rest args)
-  (alexandria:with-gensyms (b p)
-    `(let* ((,b ,beat))
-       (tempo-clock-add (tempo-clock *s*) ,b
-			(let* ((,p (list ,@args)))
-			  (lambda () (callback (+ (sched-ahead (tempo-clock *s*))
-						  (beats-to-secs (tempo-clock *s*) ,b))
-					       (lambda () (apply ,function ,p)))))))))
+  `(callback (+ (sched-ahead (tempo-clock *s*))
+		(beats-to-secs (tempo-clock *s*) ,beat))
+	     (lambda () (apply ,function (list ,@args)))))

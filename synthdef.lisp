@@ -243,36 +243,45 @@
 (defparameter *synthdef-metadata* (make-hash-table)
   "Metadata for each synthdef, such as its name, controls, body, etc.")
 
-(defun get-synthdef-metadata (synth &optional key)
+(defun synthdef-metadata (synth &optional key)
   "Get metadata about the synthdef with the name of SYNTH. When KEY is provided, return that specific item from the metadata (i.e. controls, body, etc)."
   (let ((metadata (gethash (as-keyword (if (typep synth 'node) (name synth) synth)) *synthdef-metadata*)))
     (if key
         (getf metadata (as-keyword key))
         metadata)))
 
-(defun set-synthdef-metadata (synth key value)
+(defun get-synthdef-metadata (synth &optional key)
+  "Deprecated alias for `synthdef-metadata'."
+  (synthdef-metadata synth key))
+
+(defun (setf synthdef-metadata) (value synth key)
   "Set a metadatum for the synthdef SYNTH."
   (setf (getf (gethash (as-keyword synth) *synthdef-metadata*) (as-keyword key)) value))
 
+(defun set-synthdef-metadata (synth key value)
+  "Deprecated alias for `(setf synthdef-metadata)'."
+  (setf (synthdef-metadata synth key) value))
+
 (defmacro defsynth (name params &body body)
   (setf params (mapcar (lambda (param) (if (consp param) param (list param 0.0))) params))
-  (set-synthdef-metadata name :name name)
-  (set-synthdef-metadata name :controls
-                         (mapcar (lambda (param) (append (list (car param)) (cdr param)))
-                                 params))
-  (set-synthdef-metadata name :body body)
   (alexandria:with-gensyms (synthdef)
-    `(let* ((,synthdef (make-instance 'synthdef :name ,(string-downcase name)))
-	    (*synthdef* ,synthdef))
-       (with-controls (,@params)
-	 ,@(convert-code body)
-	 (build-synthdef ,synthdef)
-	 (when (and *s* (boot-p *s*))
-	   (ecase *synth-definition-mode*
-	     (:recv (recv-synthdef ,synthdef nil))
-	     (:load (load-synthdef ,synthdef nil)))
-	   (sync))
-	 ,synthdef))))
+    `(progn
+       (set-synthdef-metadata ',name :name ',name)
+       (set-synthdef-metadata ',name :controls
+                              (mapcar (lambda (param) (append (list (car param)) (cdr param)))
+                                      ',params))
+       (set-synthdef-metadata ',name :body ',body)
+       (let* ((,synthdef (make-instance 'synthdef :name ,(string-downcase name)))
+	      (*synthdef* ,synthdef))
+	 (with-controls (,@params)
+	   ,@(convert-code body)
+	   (build-synthdef ,synthdef)
+	   (when (and *s* (boot-p *s*))
+	     (ecase *synth-definition-mode*
+	       (:recv (recv-synthdef ,synthdef nil))
+	       (:load (load-synthdef ,synthdef nil)))
+	     (sync))
+	   ,synthdef)))))
 
 (defvar *temp-synth-name* "temp-synth")
 
@@ -327,6 +336,26 @@
     (message-distribute new-synth
                         (apply #'make-synth-msg *s* name-string next-id to pos args)
                         *s*)))
+
+#+swank ;; make slime show the synthdef's argument list for (synth ...)
+(defmethod swank::compute-enriched-decoded-arglist ((operator-form (eql 'synth)) argument-forms)
+  (let* ((fst (car argument-forms))
+         (controls (unless (typep fst 'swank::arglist-dummy)
+                     (synthdef-metadata (if (and (listp fst)
+                                                 (eql 'quote (car fst)))
+                                            (cadr fst)
+                                            fst)
+                                        :controls))))
+    (if controls
+        (let ((req (loop :for ctl :in controls
+                      :if (atom ctl)
+                      :collect ctl))
+              (key (loop :for ctl :in controls
+                      :if (listp ctl)
+                      :collect (swank::make-keyword-arg (alexandria:make-keyword (car ctl)) (car ctl) (cadr ctl)))))
+          (swank::make-arglist :required-args (append (list fst) req) :key-p t :keyword-args key))
+        (call-next-method))))
+
 
 
 (defun get-controls-list (form)

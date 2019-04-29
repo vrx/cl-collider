@@ -12,7 +12,8 @@
 	       #:pileup
 	       #:flexi-streams
 	       #:split-sequence
-	       #:named-readtables)
+	       #:named-readtables
+           #:simple-inferiors)
   :serial t
   :components ((:file "package")
 	       #+(or sbcl ecl) (:file "id-map")
@@ -30,6 +31,7 @@
 	       (:file "ugens/fftunpacking")
 	       (:file "ugens/fft")
 	       (:file "ugens/envgen")
+	       (:file "ugens/ienvgen")
 	       (:file "ugens/noise")
 	       (:file "ugens/filter")
 	       (:file "ugens/osc")
@@ -55,8 +57,10 @@
 	       (:file "ugens/stochastic")
 	       (:file "ugens/testugens")
 	       (:file "ugens/hilbert")
+	       (:file "ugens/machine-listening")
 	       (:file "ugens/extras/envfollow")
 	       (:file "ugens/extras/mdapiano")
 	       (:file "ugens/extras/joshpv")
+	       (:file "ugens/extras/mcldbufferugens")
 	       (:file "ugens/extras/pitchdetection")
 	       (:file "ugens/extras/ladspa")))
