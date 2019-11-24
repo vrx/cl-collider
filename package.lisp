@@ -25,7 +25,7 @@
 	   #:defsynth
 	   #:synth
 	   #:get-synthdef-metadata
-       #:synthdef-metadata
+	   #:synthdef-metadata
 	   #:with-controls
 	   #:play
 	   #:proxy
@@ -70,16 +70,19 @@
 	   #:group-free-all
 	   #:stop
 	   #:server-status
-	   #:*group-free-all-hook*
-	   #:*stop-hook*
+	   #:*server-quit-hooks*
+	   #:*group-free-all-hooks*
+	   #:*stop-hooks*
 
 	   #:now
 	   #:callback
 	   #:quant
+	   #:set-clock
 	   #:clock-bpm
+	   #:clock-beats
 	   #:clock-add
 	   #:clock-quant
-	   #:clock-tm
+	   #:clock-dur
 	   #:clock-clear
 	   #:at-beat
 	   #:at-task
@@ -159,13 +162,15 @@
 	   #:dadsr
 	   #:adsr
 	   #:asr
+	   #:env-at
 	   #:env-as-signal
 
 	   #:fft
 	   #:ifft
 	   #:pvcalc
 	   #:pvcalc2
-	   #:pv-collect))
+	   #:pv-collect
+	   #:running-sum-rms))
 
 (defpackage #:sc-user
   (:use #:cl #:sc))

@@ -3,17 +3,22 @@
 (defvar *s* nil
   "Special symbol bound to the default scsynth server. If functions do not specify a target server, that message is sent to the *s* server.")
 
+(defun sc-path-not-found-warning ()
+  (progn (warn "SuperCollider was not found in the default path.") #p""))
+
 #+windows
 (defvar *win-sc-dir*
   (or (find-if (alexandria:compose (alexandria:curry #'search "SuperCollider")
 				   #'namestring)
 	       (uiop:subdirectories (uiop:getenv-pathname "ProgramFiles"))
 	       :from-end t)
-      (progn (warn "SuperCollider was not found in the default path.") #p"")))
+       (sc-path-not-found-warning)))
 
 ;; default path are which build target from source
 (defvar *sc-synth-program*
-  #+darwin "/Applications/SuperCollider/SuperCollider.app/Contents/Resources/scsynth"
+  #+darwin (or (find-if #'uiop:file-exists-p '("/Applications/SuperCollider/SuperCollider.app/Contents/Resources/scsynth"
+                                               "/Applications/SuperCollider.app/Contents/Resources/scsynth"))
+               (sc-path-not-found-warning))	
   #+linux (handler-case
             (uiop:run-program "which scsynth" :output :line)
             (t (c)
@@ -23,8 +28,9 @@
   "The path to the scsynth binary.")
 
 (setf *sc-plugin-paths*
-  #+darwin (list "/Applications/SuperCollider/SuperCollider.app/Contents/Resources/plugins/"
-		 "~/Library/Application\ Support/SuperCollider/Extensions/")
+  #+darwin (list (or (find-if #'uiop:truename* '("/Applications/SuperCollider/SuperCollider.app/Contents/Resources/plugins/"
+                                                 "/Applications/SuperCollider.app/Contents/Resources/plugins/")))
+	      "~/Library/Application\ Support/SuperCollider/Extensions/")    
   #+linux (remove-if-not
             #'uiop:directory-exists-p
             (list
@@ -124,7 +130,7 @@
 
 (defgeneric sc-reply-thread (rt-server))
 
-(defvar *cleanup-functions* nil)
+(defvar *server-quit-hooks* nil)
 (defvar *all-rt-servers* nil)
 
 (defclass rt-server (server)
@@ -169,6 +175,7 @@
 			   :timestamp (server-time-stamp self))
 	(tempo-clock self) (make-instance 'tempo-clock
 			     :name (name self)
+			     :bpm 60.0
 			     :base-beats 0
 			     :base-seconds (unix-time)
 			     :beat-dur 1.0)))
@@ -218,7 +225,7 @@
     (send-message rt-server "/notify" 1)
     (sched-run (scheduler rt-server))
     (tempo-clock-run (tempo-clock rt-server))
-    (setf (node-watcher rt-server) (list 0 1))
+    (sync rt-server)
     (group-free-all rt-server)
     (let ((options (server-options rt-server)))
       (setf (node-proxy-table rt-server) (make-hash-table)
@@ -233,10 +240,11 @@
 
 (defmethod server-quit ((rt-server rt-server))
   (unless (boot-p rt-server) (error "SuperCollider server is not running."))
-  (dolist (f *cleanup-functions*)
+  (dolist (f *server-quit-hooks*)
     (funcall f))
   (send-message rt-server "/quit")
   (thread-wait (lambda () (not (boot-p rt-server))))
+  (setf (node-watcher rt-server) nil)
   (sched-stop (scheduler rt-server))
   (tempo-clock-stop (tempo-clock rt-server))
   (cleanup-server rt-server))
@@ -297,12 +305,13 @@
 	 (setf (frames buffer) frames (chanls buffer) chanls (sr buffer) sr))))
     (add-reply-responder
      "/fail"
-     (lambda (&rest args) (format t "FAILURE in server: ~{~a ~}~%" args)))
+     (lambda (&rest args)
+       (declare (ignore args))))
     (add-reply-responder
      "/n_go"
      (lambda (id &rest args)
        (declare (ignore args))
-       (push id (node-watcher rt-server))))
+       (pushnew id (node-watcher rt-server))))
     (add-reply-responder
      "/n_end"
      (lambda (id &rest args)
@@ -464,14 +473,17 @@
 	     (write-sequence (osc::encode-int32 (length ,message)) ,non-realtime-stream)
 	     (write-sequence ,message ,non-realtime-stream))))
        (sc-program-run (full-pathname *sc-synth-program*)
-		               (list "-U" (format nil "~{~a~^:~}" (mapcar #'full-pathname *sc-plugin-paths*))
-			                 "-N" ,osc-file
-			                 "_" ,file-name ,(write-to-string sr) (string-upcase (pathname-type ,file-name))
-			                 (ecase ,format
-			                   (:int16 "int16")
-			                   (:int24 "int24")
-			                   (:float "float")
-			                   (:double "double"))))
+		       (list "-U" (format nil
+					  #-windows "~{~a~^:~}"
+					  #+windows "~{~a~^;~}"
+					  (mapcar #'full-pathname *sc-plugin-paths*))
+			     "-N" ,osc-file
+			     "_" ,file-name ,(write-to-string sr) (string-upcase (pathname-type ,file-name))
+			     (ecase ,format
+			       (:int16 "int16")
+			       (:int24 "int24")
+			       (:float "float")
+			       (:double "double"))))
        (unless ,keep-osc-file
 	 (delete-file ,osc-file))
        (values))))
@@ -550,9 +562,10 @@
   (ctrl node :gate 0))
 
 (defun is-playing-p (node)
-  (with-node (node id server)
-    (when (find id (node-watcher server))
-      t)))
+  (when node
+    (with-node (node id server)
+      (when (find id (node-watcher server))
+	t))))
 
 ;;; Group
 (defclass group (node)
@@ -574,7 +587,7 @@
 (defun server-query-all-nodes (&optional (rt-server *s*))
   (send-message rt-server "/g_dumpTree" 0 0))
 
-(defvar *group-free-all-hook* nil)
+(defvar *group-free-all-hooks* nil)
 
 (defun group-free-all (&optional (rt-server *s*))
   (let ((*s* rt-server))
@@ -583,10 +596,10 @@
     (send-message rt-server "/g_freeAll" 0)
     (send-message rt-server "/clearSched")
     (make-group :id 1 :pos :head :to 0)
-    (dolist (hook *group-free-all-hook*)
+    (dolist (hook *group-free-all-hooks*)
       (funcall hook))))
 
-(defvar *stop-hook* nil)
+(defvar *stop-hooks* nil)
 
 (defun stop (&optional (group 1) &rest groups)
   (sched-clear (scheduler *s*))
@@ -594,7 +607,7 @@
   (dolist (group (cons group groups))
     (send-message *s* "/g_freeAll" group)
     (send-message *s* "/clearSched"))
-  (dolist (hook *stop-hook*)
+  (dolist (hook *stop-hooks*)
     (funcall hook)))
 
 (defun server-status (&optional (rt-server *s*))
@@ -612,13 +625,22 @@
 
 
 ;;; tempo-clock
+(defun set-clock (new-clock)
+  (stop)
+  (tempo-clock-stop (tempo-clock *s*))
+  (setf (tempo-clock *s*) new-clock)
+  (tempo-clock-run (tempo-clock *s*)))
+
 (defun clock-bpm (&optional bpm)
   (tempo-clock-bpm (tempo-clock *s*) bpm))
+
+(defun clock-beats ()
+  (tempo-clock-beats (tempo-clock *s*)))
 
 (defun clock-quant (quant)
   (tempo-clock-quant (tempo-clock *s*) quant))
 
-(defun clock-tm (beat)
+(defun clock-dur (beat)
   (* (beat-dur (tempo-clock *s*)) beat))
 
 (defun clock-add (beat function &rest args)
