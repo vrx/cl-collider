@@ -95,6 +95,9 @@
   (:documentation "The scsynth server can run across the network.
  If the server is running on the local machine, return T, otherwise NIL."))
 
+(defgeneric free (object)
+  (:documentation "Free a node or buffer on the server."))
+
 (defgeneric sr (buffer))
 (defgeneric (setf sr) (sr buffer))
 (defgeneric chanls (buffer))
@@ -276,7 +279,8 @@
     (add-reply-responder
      "/status.reply"
      (lambda (&rest args)
-       (apply #'format t "~&UGens    : ~4d~&Synths   : ~4d~&Groups   : ~4d~&SynthDefs: ~4d~&% CPU (Average): ~a~&% CPU (Peak)   : ~a~&SampleRate (Nominal): ~a~&SampleRate (Actual) : ~a~%" (cdr args))))
+       (apply #'format t "~&UGens    : ~4d~&Synths   : ~4d~&Groups   : ~4d~&SynthDefs: ~4d~&% CPU (Average): ~a~&% CPU (Peak)   : ~a~&SampleRate (Nominal): ~a~&SampleRate (Actual) : ~a~%" (cdr args))
+       (force-output)))
     (add-reply-responder
      "/synced"
      (lambda (id)
@@ -552,8 +556,14 @@
   (warn "#'bye is deprecated; please use #'free instead.")
   (free node))
 
-(defun free (node)
-  "Free a node running on the server."
+(defmethod free ((node node))
+  (with-node (node id server)
+    (message-distribute node (list "/n_free" id) server)))
+
+(defmethod free ((node fixnum))
+  (send-message *s* "/n_free" node))
+
+(defmethod free ((node symbol))
   (with-node (node id server)
     (message-distribute node (list "/n_free" id) server)))
 
@@ -654,7 +664,17 @@
   `(at (beats-to-secs (tempo-clock *s*) ,beat)
      ,@body))
 
-(defmacro at-task (beat function &rest args)
-  `(callback (+ (sched-ahead (tempo-clock *s*))
-		(beats-to-secs (tempo-clock *s*) ,beat))
-	     (lambda () (apply ,function (list ,@args)))))
+
+(defun at-synth (beat name &rest param &key &allow-other-keys)
+  (clock-add beat
+	     (lambda ()
+	       (at (beats-to-secs (tempo-clock *s*) beat)
+		 (apply (if (keywordp name) #'ctrl #'synth) name param)))))
+
+
+(defun at-task (beat fun &rest args)
+  (clock-add beat
+	     (lambda ()
+	       (callback (+ (sched-ahead (tempo-clock *s*))
+			    (beats-to-secs (tempo-clock *s*) beat))
+			 (lambda () (apply fun args))))))
