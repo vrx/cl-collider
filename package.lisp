@@ -29,27 +29,16 @@
 	   #:with-controls
 	   #:play
 	   #:proxy
-	   #:clip
-	   #:fold
-	   #:wrap
-	   #:range
-	   #:exp-range
-	   #:lin-lin
-	   #:lin-exp
-	   #:exp-lin
-	   #:exp-exp
 
 	   #:with-rendering
 
 	   #:all-running-servers
-	   #:reply-log-p
 	   #:make-external-server
 	   #:server-boot
 	   #:server-quit
+	   #:boot-p 
 	   #:send-message
 	   #:send-bundle
-	   #:addr
-	   #:lisp-port
 
 	   #:control-get
 	   #:control-set
@@ -92,6 +81,7 @@
 	   #:sr
 	   #:frames
 	   #:chanls
+	   #:path
 	   #:buffer-read
 	   #:buffer-read-channel
 	   #:buffer-alloc
@@ -110,7 +100,7 @@
 	   #:buffer-dur
 	   #:buffer-copy
 	   
-	   #:wavetable
+	   #:buffer-fill
 	   #:buffer-read-as-wavetable
 	   #:calc-pv-recsize
 	   #:local-buf
@@ -151,8 +141,18 @@
 	   #:product
 	   #:dup
 	   #:==
+	   #:if~
+	   #:clip
 	   #:clip2
-	   
+	   #:fold
+	   #:wrap
+	   #:range
+	   #:exp-range
+	   #:lin-lin
+	   #:lin-exp
+	   #:exp-lin
+	   #:exp-exp
+
 	   #:env-shape-number
 	   #:env
 	   #:triangle
@@ -167,7 +167,6 @@
 	   #:env-as-signal
 
 	   #:fft
-	   #:ifft
 	   #:pvcalc
 	   #:pvcalc2
 	   #:pv-collect

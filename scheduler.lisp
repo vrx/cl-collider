@@ -14,7 +14,7 @@
 	(values (ccl:pref tv :timeval.tv_sec) (ccl:pref tv :timeval.tv_usec))
       (+ secs (* usecs 1.0d-6)))))
  
-#+ecl
+#+(or ecl lispworks)
 (progn
   (cffi:defctype time_t :long)
   (cffi:defctype seconds_t :int)
@@ -31,6 +31,7 @@
     (cffi:with-foreign-object (tv '(:struct timeval))
       (gettimeofday tv (cffi::null-pointer))
       (+ (cffi:mem-ref tv 'time_t) (* (cffi:mem-ref tv 'seconds_t (cffi:foreign-type-size 'time_t)) 1.0d-6)))))
+
 
 #-windows
 (cffi:defcstruct sched-param
@@ -93,8 +94,7 @@
    (mutex
     :reader mutex)
    (condition-var
-    :initform #-ecl (bt:make-condition-variable)
-	      #+ecl (bt-sem:make-semaphore)
+    :initform (bt:make-condition-variable)
     :reader condition-var)
    (in-queue
     :initform (pileup:make-heap #'<= :size 100 :key #'sched-event-timestamp)
@@ -107,7 +107,7 @@
     :accessor sched-status)
    (ahead
     :initarg :sched-ahead
-    :initform .3
+    :initform .3d0
     :accessor sched-ahead)
    (timestamp
     :initarg :timestamp
@@ -119,30 +119,8 @@
 (defmethod initialize-instance :after ((self scheduler) &key)
   ;;; pilep:heap include lock. so scheduler use that lock.
   (with-slots (mutex in-queue) self
-    #-ecl (setf mutex (slot-value in-queue 'pileup::lock))
-    #+ecl (setf mutex (bt:make-recursive-lock))))
-
-
-;;; timed wait -----------------------------------------------------------------------------------------
-
-(defun condition-wait (condition-variable lock)
-  #-ecl (bt:condition-wait condition-variable lock)
-  #+ecl
-  (progn
-    (bt:release-lock lock)
-    (unwind-protect (bt-sem:wait-on-semaphore condition-variable)
-      (bt:acquire-lock lock t))))
-
-(defun condition-timed-wait (condition-variable lock time)
-  #+sbcl (unless (bt:condition-wait condition-variable lock :timeout time)
-	   (bt:acquire-lock lock t))
-  #-sbcl
-  (progn
-    (bt:release-lock lock)
-    (unwind-protect
-	 #+ccl (ccl:timed-wait-on-semaphore condition-variable time)
-      #+ecl(bt-sem:wait-on-semaphore condition-variable :timeout time)
-      (bt:acquire-lock lock t))))
+    #-(or ecl lispworks) (setf mutex (slot-value in-queue 'pileup::lock))
+    #+(or ecl lispworks) (setf mutex (bt:make-recursive-lock))))
 
 ;;; -----------------------------------------------------------------------------------------------------
 
@@ -165,11 +143,11 @@
 			(let* ((run-p t))
 			  (loop while run-p do
 			    (loop :while (pileup:heap-empty-p (in-queue scheduler))
-				  :do (condition-wait (condition-var scheduler) (mutex scheduler)))
+				  :do (bt:condition-wait (condition-var scheduler) (mutex scheduler)))
 			    (loop :while (not (pileup:heap-empty-p (in-queue scheduler)))
 				  :do (let ((timeout (- (sched-event-timestamp (pileup:heap-top (in-queue scheduler))) (sched-time scheduler))))
 					(unless (plusp timeout) (return))
-					(condition-timed-wait (condition-var scheduler) (mutex scheduler) timeout)))
+					(bt:condition-wait (condition-var scheduler) (mutex scheduler) :timeout timeout)))
 			    (loop :while (and (not (pileup:heap-empty-p (in-queue scheduler)))
 					      (>= (sched-time scheduler) (sched-event-timestamp (pileup:heap-top (in-queue scheduler)))))
 				  :do (when (eql 'ensure-scheduler-stop-quit ;; it's magic code. it seems chagne..
@@ -190,10 +168,9 @@
  '(- time (sched-ahead scheduler)) is actual time it runs to f."
   (bt:with-recursive-lock-held ((mutex scheduler))
     (pileup:heap-insert (make-sched-event :timestamp (- time (sched-ahead scheduler))
-				   :task (lambda () (apply f args)))
+					  :task (lambda () (apply f args)))
 			(in-queue scheduler))
-    #-ecl (bt:condition-notify (condition-var scheduler))
-    #+ecl (bt-sem:signal-semaphore (condition-var scheduler)))
+    (bt:condition-notify (condition-var scheduler)))
   (values))
 
 (defun sched-clear (scheduler)
@@ -202,8 +179,7 @@
     (let ((queue (in-queue scheduler)))
       (loop :while (not (pileup:heap-empty-p queue))
 	    :do (pileup:heap-pop queue)))
-    #-ecl (bt:condition-notify (condition-var scheduler))
-    #+ecl (bt-sem:signal-semaphore (condition-var scheduler)))
+    (bt:condition-notify (condition-var scheduler)))
   (values))
 
 (defun sched-stop (scheduler)
@@ -244,13 +220,13 @@
 			(let* ((run-p t))
 			  (loop while run-p do
 			    (loop :while (pileup:heap-empty-p (in-queue tempo-clock))
-				  :do (condition-wait (condition-var tempo-clock) (mutex tempo-clock)))
+				  :do (bt:condition-wait (condition-var tempo-clock) (mutex tempo-clock)))
 			    (loop :while (not (pileup:heap-empty-p (in-queue tempo-clock)))
 				  :do (let ((timeout (- (- (beats-to-secs tempo-clock (sched-event-timestamp (pileup:heap-top (in-queue tempo-clock))))
 							   (sched-ahead tempo-clock))
 							(unix-time))))
 					(unless (plusp timeout) (return))
-					(condition-timed-wait (condition-var tempo-clock) (mutex tempo-clock) timeout)))
+					(bt:condition-wait (condition-var tempo-clock) (mutex tempo-clock) :timeout timeout)))
 			    (loop :while (and (not (pileup:heap-empty-p (in-queue tempo-clock)))
 					      (>= (unix-time)
 						  (- (beats-to-secs tempo-clock (sched-event-timestamp (pileup:heap-top (in-queue tempo-clock))))
@@ -260,6 +236,7 @@
 					(setf run-p nil)
 					(return)))))
 		      (error (c) (format t "~&Error \"~a\" in Tempo-Clock thread~%" c)
+			(finish-output)
 			(run)))))
 	   (set-thread-realtime-priority)
 	   (bt:with-lock-held ((mutex tempo-clock))
@@ -292,7 +269,7 @@
 	(setf base-seconds (beats-to-secs tempo-clock in-beats)
 	      base-beats in-beats
 	      bpm new-bpm
-	      beat-dur (/ 60.0 new-bpm))))
+	      beat-dur (/ 60.0d0 new-bpm))))
     (bt:condition-notify (condition-var tempo-clock))))
 
 (defmethod tempo-clock-bpm ((tempo-clock tempo-clock) &optional new-bpm)
@@ -307,7 +284,7 @@
     (bt:condition-notify (condition-var tempo-clock))))
 
 (defmethod tempo-clock-quant ((tempo-clock tempo-clock) quant)
-  (let* ((beats (secs-to-beats tempo-clock (+ .3 (sched-time tempo-clock)))))
+  (let* ((beats (secs-to-beats tempo-clock (+ .3d0 (sched-time tempo-clock)))))
     (+ beats (- quant (mod beats quant)))))
 
 

@@ -43,11 +43,18 @@
 						  (uiop:get-folder-path :local-appdata)))))
 
 (defvar *sc-synthdefs-path*
-  #+darwin (full-pathname "~/Library/Application Support/SuperCollider/synthdefs")
+  #+darwin (full-pathname "~/Library/Application Support/SuperCollider/synthdefs/")
   #+linux (full-pathname "~/.local/share/SuperCollider/synthdefs/")
   #+windows (full-pathname (merge-pathnames #P"SuperCollider/synthdefs/"
 					    (uiop:get-folder-path :local-appdata)))
   "The directory where the scsyndef files for synthdefs are saved.")
+
+(defvar *sc-help-paths*
+  (mapcar (lambda (dir)
+	    (merge-pathnames (make-pathname :directory '(:relative :back "HelpSource" "Classes"))
+			     dir))
+	  *sc-plugin-paths*)
+  "A list of directories where helpfiles for SuperCollider UGens will be searched.")
 
 ;;; -------------------------------------------------------
 ;;; Server - base class
@@ -55,21 +62,24 @@
 
 (defclass server ()
   ((name :initarg :name :initform "" :reader name)
+   (server-options :initarg :server-options :reader server-options)
    (server-lock :initform (bt:make-lock) :reader server-lock)
    (id :initform (list #-sbcl 999 #+sbcl 1000)
-       :reader id)
+       :accessor id)
+   (group-id :initform 1 :accessor group-id)
    (buffers :initarg :buffers :accessor buffers)
    (audio-buses :initarg :audio-buses :accessor audio-buses)
-   (control-buses :initarg :control-buses :accessor control-buses))
+   (control-buses :initarg :control-buses :accessor control-buses)
+   (tempo-clock :accessor tempo-clock)
+   (node-proxy-table :accessor node-proxy-table))
   (:documentation "This is base class for the scsynth server. This library includes realtime server, NRT server, and internal server (not yet implemented)."))
-
-
 
 (defun get-next-id (server)
   #+ccl (ccl::atomic-incf (car (id server)))
   #+sbcl (sb-ext:atomic-incf (car (id server)))
   #+ecl (bt:with-lock-held ((server-lock server))
-	  (incf (car (id server)))))
+	  (incf (car (id server))))
+  #+lispworks (system:atomic-incf (car (id server))))
 
 
 ;;; declare generic function for realtime server
@@ -137,17 +147,12 @@
 (defvar *all-rt-servers* nil)
 
 (defclass rt-server (server)
-  ((server-options
-    :initarg :server-options
-    :reader server-options)
-   (server-time-stamp
+  ((server-time-stamp
     :initarg :server-time-stamp
     :initform #'unix-time
     :accessor server-time-stamp)
    (scheduler
     :accessor scheduler)
-   (tempo-clock
-    :accessor tempo-clock)
    (sc-thread
     :initform nil
     :accessor sc-thread)
@@ -167,9 +172,7 @@
     :allocation :class)
    (node-watcher
     :initform nil
-    :accessor node-watcher)
-   (node-proxy-table
-    :accessor node-proxy-table)))
+    :accessor node-watcher)))
 
 (defmethod initialize-instance :after ((self rt-server) &key)
   (push self *all-rt-servers*)
@@ -178,10 +181,10 @@
 			   :timestamp (server-time-stamp self))
 	(tempo-clock self) (make-instance 'tempo-clock
 			     :name (name self)
-			     :bpm 60.0
-			     :base-beats 0
+			     :bpm 60.0d0
+			     :base-beats 0.0d0
 			     :base-seconds (unix-time)
-			     :beat-dur 1.0)))
+			     :beat-dur 1.0d0)))
 
 (let ((semaphore-table (make-hash-table)))
   (defun get-semaphore-by-thread ()
@@ -190,7 +193,8 @@
       (unless semaphore
 	(let ((new-semaphore #+ccl (ccl:make-semaphore)
 			     #+sbcl (sb-thread:make-semaphore)
-			     #+ecl (mp:make-semaphore)))
+			     #+ecl (mp:make-semaphore)
+			     #+lispworks (mp:make-semaphore :count 0)))
 	  (setf (gethash (bt:current-thread) semaphore-table) new-semaphore
 		semaphore new-semaphore)))
       semaphore)))
@@ -203,10 +207,11 @@
 	(send-message rt-server "/sync" id)
 	#+ccl (ccl:wait-on-semaphore semaphore)
 	#+sbcl (sb-thread:wait-on-semaphore semaphore)
-	#+ecl (mp:wait-on-semaphore semaphore)))))
+	#+ecl (mp:wait-on-semaphore semaphore)
+	#+lisworks (mp:semaphore-acquire semaphore)))))
 
 (defmethod server-boot ((rt-server rt-server))
-  (when (boot-p rt-server) (error "SuperCollider server already running."))
+  (assert (not (boot-p rt-server)) nil "~a already running." rt-server)
   (bootup-server-process rt-server)
   (initialize-server-responder rt-server)
   (labels ((bootup ()
@@ -225,13 +230,16 @@
     (cleanup-server rt-server)
     (error "Server failed to boot."))
   (when (boot-p rt-server)
+    (setf (node-watcher rt-server) (list 0))
     (send-message rt-server "/notify" 1)
     (sched-run (scheduler rt-server))
     (tempo-clock-run (tempo-clock rt-server))
     (sync rt-server)
     (group-free-all rt-server)
     (let ((options (server-options rt-server)))
-      (setf (node-proxy-table rt-server) (make-hash-table)
+      (setf (id rt-server) (list #-sbcl 999 #+sbcl 1000)
+	    (group-id rt-server) 1
+	    (node-proxy-table rt-server) (make-hash-table)
             (buffers rt-server) (make-array (server-options-num-sample-buffers options) :initial-element nil)
             (audio-buses rt-server) (make-array (server-options-num-audio-bus options) :initial-element nil)
             (control-buses rt-server) (make-array (server-options-num-control-bus options) :initial-element nil))
@@ -242,15 +250,16 @@
   rt-server)
 
 (defmethod server-quit ((rt-server rt-server))
-  (unless (boot-p rt-server) (error "SuperCollider server is not running."))
-  (dolist (f *server-quit-hooks*)
-    (funcall f))
+  (assert (boot-p rt-server) nil "~a is not running." rt-server)
   (send-message rt-server "/quit")
   (thread-wait (lambda () (not (boot-p rt-server))))
   (setf (node-watcher rt-server) nil)
   (sched-stop (scheduler rt-server))
   (tempo-clock-stop (tempo-clock rt-server))
-  (cleanup-server rt-server))
+  (cleanup-server rt-server)
+  (dolist (f *server-quit-hooks*)
+    (funcall f))
+  rt-server)
 
 (defun add-reply-responder (cmd handler)
   (install-reply-responder *s* cmd handler))
@@ -270,11 +279,7 @@
     (add-reply-responder
      "/done"
      (lambda (path &rest options)
-       (cond ((string= path "/notify")
-	      (destructuring-bind (client-id max-logins)
-		  options
-		(declare (ignore client-id max-logins))))
-	     ((string= path "/quit") (setf (boot-p rt-server) nil))
+       (cond ((string= path "/quit") (setf (boot-p rt-server) nil))
 	     ((char= (elt path 1) #\b) (process-buffer-complete-handle rt-server (list path (car options)))))))
     (add-reply-responder
      "/status.reply"
@@ -289,7 +294,8 @@
 	 (otherwise (let ((semaphore (id-map-free-object (sync-id-map rt-server) id)))
 		      #+ccl (ccl:signal-semaphore semaphore)
 		      #+sbcl (sb-thread:signal-semaphore semaphore)
-		      #+ecl (mp:signal-semaphore semaphore))))))
+		      #+ecl (mp:signal-semaphore semaphore)
+		      #+lispworks (mp:semaphore-release semaphore))))))
     (add-reply-responder
      "/c_set"
      (lambda (bus value)
@@ -402,12 +408,12 @@
 
 (defmethod server-quit ((rt-server external-server))
   (if (just-connect-p rt-server) (progn
-				   (assert (boot-p rt-server) nil "SuperCollider server is not running.")
+				   (assert (boot-p rt-server) nil "~a is not running." rt-server)
 				   (send-message rt-server "/notify" 0)
 				   (setf (boot-p rt-server) nil)
 				   (sc-osc:close-device (osc-device rt-server))
 				   (sched-stop (scheduler rt-server)))
-      (call-next-method)))
+    (call-next-method)))
 
 
 (defmethod install-reply-responder ((rt-server external-server) cmd-name f)
@@ -438,21 +444,32 @@
 				  :just-connect-p just-connect-p))
 
 
-;;cleanup
-(labels ((clean-up-server ()
+;; cleanup server
+(labels ((cleanup-server ()
 	   (dolist (server (all-running-servers))
 	     (server-quit server))))
-  #+ccl (push #'clean-up-server ccl::*lisp-cleanup-functions*)
-  #+sbcl (push #'clean-up-server sb-ext:*exit-hooks*)
-  #+ecl (push #'clean-up-server si:*exit-hooks*))
+  #+ccl (push #'cleanup-server ccl::*lisp-cleanup-functions*)
+  #+sbcl (push #'cleanup-server sb-ext:*exit-hooks*)
+  #+ecl (push #'cleanup-server si:*exit-hooks*)
+  #+lispworks (lispworks:define-action "Confirm when quitting image" "cleanup scsynth"
+		#'(lambda () (cleanup-server) t)))
 
 
 
 ;;; -------------------------------------------------------
 ;;; Non Realtime Server
 ;;; -------------------------------------------------------
+
+(defvar *nrt-pad* nil)
+
 (defclass nrt-server (server)
   ((streams :initarg :streams :initform nil :accessor streams)))
+
+(defmethod boot-p ((server nrt-server))
+  t)
+
+(defmethod sc-reply-thread ((server nrt-server))
+  (bt:current-thread))
 
 (defmethod send-message ((server nrt-server) &rest msg)
   (send-bundle server 0.0d0 msg))
@@ -461,36 +478,49 @@
   (declare (type double-float time))
   (push (list (- time osc::+unix-epoch+) list-of-messages) (streams server)))
 
-(defmacro with-rendering ((output-files &key (pad nil) (keep-osc-file nil) (format :int24) (sr 44100)) &body body)
-  (alexandria:with-gensyms (osc-file file-name non-realtime-stream message)
-    `(let* ((,file-name (full-pathname ,output-files))
+(defmacro with-rendering ((output-files &key (pad nil) (keep-osc-file nil) (format :int24) (sr 44100)
+					  (clock-bpm (if *s* (clock-bpm) 60.0d0)) (num-of-output 2)) &body body)
+  (alexandria:with-gensyms (osc-file file-name non-realtime-stream message bpm)
+    `(let* ((,bpm ,clock-bpm)
+	    (,file-name (full-pathname ,output-files))
 	    (,osc-file (cat (subseq ,file-name 0 (position #\. ,file-name)) ".osc"))
-	    (*s* (make-instance 'nrt-server :name "NRTSynth" :streams nil)))
-       (make-group :id 1 :pos :head :to 0)
-       ,@body
-       (when ,pad (send-bundle *s* (* 1.0d0 ,pad) (list "/c_set" 0 0)))
-       (with-open-file (,non-realtime-stream ,osc-file :direction :output :if-exists :supersede
-						       :element-type '(unsigned-byte 8))
-	 (dolist (,message (sort (streams *s*)  #'<= :key #'car))
-	   (when (and ,pad (> (car ,message) ,pad)) (return))
-	   (let ((,message (sc-osc::encode-bundle (second ,message) (car ,message))))
-	     (write-sequence (osc::encode-int32 (length ,message)) ,non-realtime-stream)
-	     (write-sequence ,message ,non-realtime-stream))))
-       (sc-program-run (full-pathname *sc-synth-program*)
-		       (list "-U" (format nil
-					  #-windows "~{~a~^:~}"
-					  #+windows "~{~a~^;~}"
-					  (mapcar #'full-pathname *sc-plugin-paths*))
-			     "-N" ,osc-file
-			     "_" ,file-name ,(write-to-string sr) (string-upcase (pathname-type ,file-name))
-			     (ecase ,format
-			       (:int16 "int16")
-			       (:int24 "int24")
-			       (:float "float")
-			       (:double "double"))))
-       (unless ,keep-osc-file
-	 (delete-file ,osc-file))
-       (values))))
+	    (*s* (make-instance 'nrt-server :name "NRTSynth" :streams nil
+				:server-options (make-server-options))))
+       (setf (buffers *s*) (make-array (server-options-num-sample-buffers (server-options *s*))
+			     :initial-element nil)
+	     (tempo-clock *s*) (make-instance 'tempo-clock
+				 :bpm ,bpm
+				 :base-beats 0.0d0
+				 :base-seconds 0.0d0
+				 :beat-dur (/ 60.0d0 ,bpm))
+	     (node-proxy-table *s*) (make-hash-table))
+       (let* ((*nrt-pad* ,pad))
+	 (make-group :id 1 :pos :head :to 0)
+	 ,@body
+	 (when *nrt-pad* (send-bundle *s* (* 1.0d0 *nrt-pad*) (list "/c_set" 0 0)))
+	 (with-open-file (,non-realtime-stream ,osc-file :direction :output :if-exists :supersede
+							 :element-type '(unsigned-byte 8))
+	   (dolist (,message (sort (streams *s*)  #'<= :key #'car))
+	     (when (and ,pad (> (car ,message) ,pad)) (return))
+	     (let ((,message (sc-osc::encode-bundle (second ,message) (car ,message))))
+	       (write-sequence (osc::encode-int32 (length ,message)) ,non-realtime-stream)
+	       (write-sequence ,message ,non-realtime-stream))))
+	 (sc-program-run (full-pathname *sc-synth-program*)
+			 (list "-U" (format nil
+					    #-windows "~{~a~^:~}"
+					    #+windows "~{~a~^;~}"
+					    (mapcar #'full-pathname *sc-plugin-paths*))
+			       "-o" (write-to-string ,num-of-output)
+			       "-N" ,osc-file
+			       "_" ,file-name ,(write-to-string sr) (string-upcase (pathname-type ,file-name))
+			       (ecase ,format
+				 (:int16 "int16")
+				 (:int24 "int24")
+				 (:float "float")
+				 (:double "double"))))
+	 (unless ,keep-osc-file
+	   (delete-file ,osc-file))
+	 (values)))))
 
 
 ;;; -------------------------------------------------------
@@ -584,15 +614,16 @@
 (defmethod print-object ((node group) stream)
   (format stream "#<~s :server ~s :id ~s>" 'group (server node) (id node)))
 
-(let ((new-group-id 1))
-  (defun make-group (&key id (server *s*) (pos :after) (to 1))
-    (with-node (to target-id rt-server)
-      (unless (numberp to)
-	(assert (eql rt-server server) nil "Target server is not group's server. (/= ~a ~a)" rt-server server))
-      (let* ((group-id (if id id (incf new-group-id)))
-	     (group (make-instance 'group :server server :id group-id :pos pos :to target-id)))
-	(message-distribute group (list "/g_new" group-id (node-to-pos pos) target-id) server)
-	group))))
+(defun make-group (&key id (server *s*) (pos :after) (to 1))
+  (with-node (to target-id rt-server)
+    (unless (numberp to)
+      (assert (eql rt-server server) nil "Target server is not group's server. (/= ~a ~a)" rt-server server))
+    (let* ((group-id (if id id (bt:with-lock-held ((server-lock server))
+				 (incf (group-id server)))))
+	   (group (make-instance 'group :server server :id group-id :pos pos :to target-id)))
+      (message-distribute group (list "/g_new" group-id (node-to-pos pos) target-id) server)
+      (sync server)
+      group)))
 
 (defun server-query-all-nodes (&optional (rt-server *s*))
   (send-message rt-server "/g_dumpTree" 0 0))
@@ -625,7 +656,12 @@
 
 ;;; scheduler
 (defun callback (time f &rest args)
-  (apply #'sched-add (scheduler *s*) time f args))
+  (if (typep *s* 'rt-server)
+      (apply #'sched-add (scheduler *s*) time f args)
+    (if *nrt-pad* (when (< time *nrt-pad*)
+		    (apply f args))
+      (apply f args))))
+
 
 (defun now ()
   (sched-time (scheduler *s*)))
@@ -654,7 +690,11 @@
   (* (beat-dur (tempo-clock *s*)) beat))
 
 (defun clock-add (beat function &rest args)
-  (tempo-clock-add (tempo-clock *s*) beat (lambda () (apply function args))))
+  (if (typep *s* 'rt-server)
+      (tempo-clock-add (tempo-clock *s*) beat (lambda () (apply function args)))
+    (if *nrt-pad* (when (< (clock-dur beat) *nrt-pad*)
+		    (apply function args))
+      (apply function args))))
 
 (defun clock-clear ()
   (tempo-clock-clear (tempo-clock *s*)))
@@ -669,7 +709,7 @@
   (clock-add beat
 	     (lambda ()
 	       (at (beats-to-secs (tempo-clock *s*) beat)
-		 (apply (if (keywordp name) #'ctrl #'synth) name param)))))
+		 (apply (if (or (keywordp name) (typep name 'node)) #'ctrl #'synth) name param)))))
 
 
 (defun at-task (beat fun &rest args)

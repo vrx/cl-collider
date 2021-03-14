@@ -213,9 +213,9 @@
     (< 'sc::<~)
     (> 'sc::>~)
     (<= 'sc::<=~)
+    (>= 'sc::>=~)
     (max 'sc::max~)
     (min 'sc::min~)
-    (if 'sc::if~)
     (logand 'sc::logand~)
     (logior 'sc::logior~)
     (ash 'sc::ash~)
@@ -338,27 +338,6 @@
                         (apply #'make-synth-msg *s* name-string next-id to pos args)
                         *s*)))
 
-#+swank ;; make slime show the synthdef's argument list for (synth ...)
-(defmethod swank::compute-enriched-decoded-arglist ((operator-form (eql 'synth)) argument-forms)
-  (let* ((fst (car argument-forms))
-         (controls (unless (typep fst 'swank::arglist-dummy)
-                     (synthdef-metadata (if (and (listp fst)
-                                                 (eql 'quote (car fst)))
-                                            (cadr fst)
-                                            fst)
-                                        :controls))))
-    (if controls
-        (let ((req (loop :for ctl :in controls
-                      :if (atom ctl)
-                      :collect ctl))
-              (key (loop :for ctl :in controls
-                      :if (listp ctl)
-                      :collect (swank::make-keyword-arg (alexandria:make-keyword (car ctl)) (car ctl) (cadr ctl)))))
-          (swank::make-arglist :required-args (append (list fst) req) :key-p t :keyword-args key))
-        (call-next-method))))
-
-
-
 (defun get-controls-list (form)
   "Scan FORM for (with-controls ...) and return the list of controls if it exists, or NIL otherwise."
   (cond ((null form) nil)
@@ -373,14 +352,14 @@
 (defmacro proxy (key body &key id (gain 1.0) (fade 0.5) (pos :head) (to 1) (out-bus 0))
   (alexandria:with-gensyms (node node-alive-p d-key)
     `(let* ((,node (gethash ,key (node-proxy-table *s*)))
-	    (,node-alive-p (is-playing-p ,node)))
+	    (,node-alive-p (when ,node (if (typep *s* 'nrt-server) t (is-playing-p ,node)))))
        ,(if body
 	    (alexandria:once-only (id fade)
 	      `(labels ((clear-node ()
 			  (when ,node-alive-p
 			    (if (getf (meta ,node) :is-signal-p) (ctrl ,node :gate 0 :fade ,fade)
 			      (free ,node)))))
-		 (when (is-playing-p ,id)
+		 (when (and (typep *s* 'rt-server) (is-playing-p ,id))
 		   (error  "already running id ~d~%" ,id))
 		 (let ((,d-key (string-downcase ,key)))
 		   (set-synthdef-metadata ,d-key :name ,d-key)
